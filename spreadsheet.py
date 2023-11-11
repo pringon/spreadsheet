@@ -2,13 +2,35 @@ from collections import deque
 from copy import deepcopy
 from typing import cast, Callable, Literal, Union
 
-CellKey = str
+
+class CellKey:
+
+    def __init__(self, key: str, negated: bool = False):
+        self.key = key
+        self.negated = negated
+
+
 CellValue = Union[str, int, "Formula"]
+
+
+def reconcile_negation(val: CellValue, negated: bool):
+    if isinstance(val, Formula):
+        if negated:
+            val.negate()
+        return val.compute()
+    if negated:
+        if isinstance(val, str):
+            raise ValueError("Cannot negate string values")
+        return -val
+    return val
+    
+
+CellGetter = Callable[[Union[CellKey, str]], CellValue]
 class Spreadsheet:
     def __init__(self):
         self._cells: dict[int, dict[str, CellValue]] = {}
 
-    def set_cell(self, cell_key: CellKey, cell_value: CellValue) -> None:
+    def set_cell(self, cell_key: str, cell_value: CellValue) -> None:
         row, col = self._parse_key(cell_key)
 
         if row not in self._cells:
@@ -25,10 +47,13 @@ class Spreadsheet:
         else:
             raise ValueError("Unexpected data type for cell value.")
 
-    def get_cell(self, cell_key: CellKey) -> CellValue:
-        return self._get_cell(cell_key)
+    def get_cell(self, cell_key: Union[CellKey, str]) -> CellValue:
+        if isinstance(cell_key, str):
+            cell_key = CellKey(cell_key)
+        val = self._get_cell(cell_key.key)
+        return reconcile_negation(val, cell_key.negated)
 
-    def _get_cell(self, cell_key: CellKey) -> CellValue:
+    def _get_cell(self, cell_key: str) -> CellValue:
         row, col = self._parse_key(cell_key)
         value = self._cells[row][col]
 
@@ -40,7 +65,7 @@ class Spreadsheet:
         
         raise ValueError(f"Unexpected cell contents: {str(value)}")
 
-    def _parse_key(self, cell_key: CellKey) -> tuple[int, str]:
+    def _parse_key(self, cell_key: str) -> tuple[int, str]:
         if len(cell_key) < 2:
             raise KeyError("Malformed cell key.")
 
@@ -58,18 +83,25 @@ class Spreadsheet:
 
 
 Operand = Union["Formula", CellKey]
-Operation = Union[Literal["+"], Literal["-"], Literal["*"], Literal["/"]]
+Operation = Literal["+", "-", "*", "/"]
+# XXX: Is it possible to refactor expressions to be just another formula?
+# One possibility might involve removing the tuples and sub-classing the formula
 Expression = Union[Operand, tuple[Literal["="], "Expression"], tuple[Operation, "Expression", "Expression"]]
 class Formula:
-    def __init__(self, get_cell: Callable[[str], CellValue], expression: Expression):
+    def __init__(self, get_cell: CellGetter, expression: Expression):
         self._get_cell = get_cell
         self._expression = expression
+        self._negated = False
 
     def compute(self) -> CellValue:
-        return self._compute_expression(self._expression)
+        val = self._compute_expression(self._expression)
+        return reconcile_negation(val, self._negated)
+    
+    def negate(self):
+        self._negated = True
 
     def _compute_expression(self, expression: Expression):
-        if isinstance(expression, str):
+        if isinstance(expression, CellKey):
             return self._get_cell(expression)
 
         if isinstance(expression, Formula):
@@ -100,32 +132,39 @@ class Formula:
 Symbol = Union[Operand, Operation]
 Grammar = Union[Expression, Symbol]
 class FormulaParser:
-    def parse_formula(self, get_cell: Callable[[str], CellValue], formula: str) -> Formula:
+    def parse_formula(self, get_cell: CellGetter, formula: str) -> Formula:
         if len(formula) <= 0 or formula[0] != "=":
             raise ValueError("Formula must be non-empty and start with a = sign")
         symbols = deque[Symbol]()
         i = 1
+        negate_value = False
         while i < len(formula):
             c = formula[i]
             if c == "(":
                 i, sub_expression = self._parse_sub_expression(i, formula, get_cell=get_cell)
+                if negate_value:
+                    sub_expression.negate()
+                    negate_value = False
                 symbols.append(sub_expression)
             elif ord("A") <= ord(c) <= ord("Z"):
                 i, cell_key = self._parse_cell_key(i, formula)
-                symbols.append(cell_key)
+                symbols.append(CellKey(cell_key, negated=negate_value))
+                negate_value = False
             elif c in ("/", "*", "-", "+"):
-                symbols.append(c)
+                if formula[i - 1] in ("=", "/", "*", "-", "+") and not negate_value:
+                    negate_value = True
+                else:
+                    symbols.append(cast(Operation, c))
             else:
                 raise ValueError(f"Unexpected character in formula: {c}")
             i += 1
 
-        expression = self._operands_to_expression(symbols)
         return Formula(
             get_cell=get_cell,
-            expression=expression.pop(),
+            expression=self._operands_to_expression(symbols),
         )
     
-    def _parse_sub_expression(self, index: int, formula: str, get_cell: Callable[[str], CellValue]) -> tuple[int, "Formula"]:
+    def _parse_sub_expression(self, index: int, formula: str, get_cell: CellGetter) -> tuple[int, "Formula"]:
             j = index + 1
             while formula[j] != ")":
                 j += 1
@@ -143,20 +182,24 @@ class FormulaParser:
                 index += 1
             return index - 1, "".join(cell_key)
     
-    def _operands_to_expression(self, symbols: deque[Symbol]) -> deque[Expression]:
+    def _operands_to_expression(self, symbols: deque[Symbol]) -> Expression:
         try:
+            grammar_objects = deepcopy(
+                cast(deque[Grammar], symbols) # Casting because a deque is invariant in its parameter
+            )
             expression = self._split_by_operations(
                 self._split_by_operations(
-                    deepcopy(cast(deque[Grammar], symbols)), # TODO: Why can I not use the Symbol sub-union here?
+                    grammar_objects,
                     set(["*", "/"])
                 ),
                 set(["+", "-"])
             )
         except ValueError as e:
             raise ValueError(", ".join(map(lambda x: str(x), symbols))) from e
-        if len(expression) != 1 or expression in ("+", "-", "*", "/"):
+        if len(expression) != 1 or expression[0] in ("+", "-", "*", "/"):
             raise ValueError(f"Malformed expression: {expression}")
-        return expression
+        # TODO: Simplify grammar/expression typing. Debt is starting to accumulate quickly.
+        return cast(Expression, expression[0])
     
     # TODO: Test this method
     def _split_by_operations(self, symbols: deque[Grammar], operations: set[Operation]) -> deque[Grammar]:
@@ -164,7 +207,7 @@ class FormulaParser:
         while symbols:
             symbol = symbols.pop()
             if symbol in operations:
-                symbol = cast(Operation, symbol) # TODO: Why does vscode correctly identify this type as Operation but mypy does not?
+                symbol = cast(Operation, symbol) # XXX: Why does vscode correctly identify this type as Operation but mypy does not?
                 try:
                     left_operand = split_exp.pop()
                     right_operand = symbols.pop()
@@ -173,14 +216,17 @@ class FormulaParser:
                 ops = ("+", "-", "*", "/")
                 if left_operand in ops or right_operand in ops:
                     raise ValueError("Operands cannot be operations")
-                split_exp.append((symbol, left_operand, right_operand))
+                # XXX: Why did typing break here?
+                split_exp.append((symbol, cast(Expression, left_operand), cast(Expression, right_operand)))
             else:
                 split_exp.append(symbol)
         return split_exp
 
 
 
-# TODO: Handle negative numbers
+# TODO: Handle floats
+# TODO: Handle numeric literals
+# TODO: Allow spaces
 # TODO: Handle ranges and functions (start with SUM over a range)
 s = Spreadsheet()
 s.set_cell("A1", 3)
@@ -204,6 +250,23 @@ assert s.get_cell("A9") == 6
 assert s.get_cell("A10") == 1
 assert s.get_cell("A11") == 7
 assert s.get_cell("A12") == 10
+
+s.set_cell("A13", "=-A12")
+assert s.get_cell("A12") == -cast(int, s.get_cell("A13"))
+s.set_cell("A13", "=-(A12+A12)")
+assert 2 * cast(int, s.get_cell("A12")) == -cast(int, s.get_cell("A13"))
+s.set_cell("A13", "=-A12+A12")
+assert s.get_cell("A13") == 0
+s.set_cell("A13", "=-(A12)+A12")
+assert s.get_cell("A13") == 0
+s.set_cell("A12", "a")
+s.set_cell("A13", "=-A12")
+value_error = False
+try:
+    s.get_cell("A13")
+except ValueError:
+    value_error = True
+assert value_error
 
 value_error = False
 try:
