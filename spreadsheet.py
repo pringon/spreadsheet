@@ -7,6 +7,7 @@ Row = int
 Col = str
 CellKey = str
 CellValue = Union[str, int, "Formula"]
+DIGITS = ("0", "1", "2", "3", "4", "5", "6", "7", "8", "9")
 
 
 CellGetter = Callable[[Union[CellKey]], CellValue]
@@ -14,22 +15,22 @@ class Spreadsheet:
     def __init__(self):
         self._cells: dict[Row, dict[Col, CellValue]] = {}
 
-    def set_cell(self, cell_key: CellKey, cell_value: CellValue) -> None:
+    def set_cell(self, cell_key: CellKey, cell_value: str) -> None:
         row, col = self._parse_key(cell_key)
 
         if row not in self._cells:
             self._cells[row] = {}
 
-        if isinstance(cell_value, str):
-            if len(cell_value) > 0 and cell_value[0] == "=":
+        stripped_val = cell_value.strip()
+
+        if all((c in DIGITS for c in stripped_val)):
+            self._cells[row][col] = int(cell_value)
+        else:
+            if len(cell_value) > 0 and stripped_val[0] == "=":
                 parser = FormulaParser()
-                self._cells[row][col] = parser.parse_formula(self.get_cell, cell_value)
+                self._cells[row][col] = parser.parse_formula(self.get_cell, stripped_val)
             else:
                 self._cells[row][col] = cell_value
-        elif isinstance(cell_value, int):
-            self._cells[row][col] = cell_value
-        else:
-            raise ValueError("Unexpected data type for cell value.")
 
     def get_cell(self, cell_key: Union[CellKey]) -> CellValue:
         return self._get_cell(cell_key)
@@ -144,6 +145,8 @@ class FormulaParser:
                     negate_value = True
                 else:
                     symbols.append(cast(Operation, c))
+            elif c == " ":
+                pass
             else:
                 raise ValueError(f"Unexpected character in formula: {c}")
             i += 1
@@ -217,11 +220,10 @@ class FormulaParser:
 
 # TODO: Handle floats
 # TODO: Handle numeric literals
-# TODO: Allow spaces
 # TODO: Handle ranges and functions (start with SUM over a range)
 s = Spreadsheet()
-s.set_cell("A1", 3)
-s.set_cell("A2", 2)
+s.set_cell("A1", "3")
+s.set_cell("A2", "2")
 s.set_cell("A3", "a")
 s.set_cell("A4", "=A1+A2")
 s.set_cell("A5", "=A1+A3")
@@ -270,14 +272,27 @@ assert value_error
 
 key_error = False
 try:
-    s.set_cell("b3", 3)
+    s.set_cell("b3", "3")
 except KeyError:
     key_error = True
 assert key_error
 
 key_error = False
 try:
-    s.set_cell("23", 3)
+    s.set_cell("23", "3")
 except KeyError:
     key_error = True
 assert key_error
+
+s.set_cell("A1", " a")
+assert s.get_cell("A1") == " a"
+s.set_cell("A1", " 2")
+assert s.get_cell("A1") == 2
+s.set_cell("A2", " =A1")
+assert s.get_cell("A2") == 2
+s.set_cell("A2", "= A1")
+assert s.get_cell("A2") == 2
+s.set_cell("A2", " =A1 +A1")
+assert s.get_cell("A2") == 4
+s.set_cell("A2", "=A1 + A1")
+assert s.get_cell("A2") == 4
