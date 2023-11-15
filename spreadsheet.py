@@ -3,34 +3,18 @@ from copy import deepcopy
 from typing import cast, Callable, Literal, Union
 
 
-class CellKey:
-
-    def __init__(self, key: str, negated: bool = False):
-        self.key = key
-        self.negated = negated
-
-
+Row = int
+Col = str
+CellKey = str
 CellValue = Union[str, int, "Formula"]
 
 
-def reconcile_negation(val: CellValue, negated: bool):
-    if isinstance(val, Formula):
-        if negated:
-            val.negate()
-        return val.compute()
-    if negated:
-        if isinstance(val, str):
-            raise ValueError("Cannot negate string values")
-        return -val
-    return val
-    
-
-CellGetter = Callable[[Union[CellKey, str]], CellValue]
+CellGetter = Callable[[Union[CellKey]], CellValue]
 class Spreadsheet:
     def __init__(self):
-        self._cells: dict[int, dict[str, CellValue]] = {}
+        self._cells: dict[Row, dict[Col, CellValue]] = {}
 
-    def set_cell(self, cell_key: str, cell_value: CellValue) -> None:
+    def set_cell(self, cell_key: CellKey, cell_value: CellValue) -> None:
         row, col = self._parse_key(cell_key)
 
         if row not in self._cells:
@@ -47,13 +31,10 @@ class Spreadsheet:
         else:
             raise ValueError("Unexpected data type for cell value.")
 
-    def get_cell(self, cell_key: Union[CellKey, str]) -> CellValue:
-        if isinstance(cell_key, str):
-            cell_key = CellKey(cell_key)
-        val = self._get_cell(cell_key.key)
-        return reconcile_negation(val, cell_key.negated)
+    def get_cell(self, cell_key: Union[CellKey]) -> CellValue:
+        return self._get_cell(cell_key)
 
-    def _get_cell(self, cell_key: str) -> CellValue:
+    def _get_cell(self, cell_key: CellKey) -> CellValue:
         row, col = self._parse_key(cell_key)
         value = self._cells[row][col]
 
@@ -65,7 +46,7 @@ class Spreadsheet:
         
         raise ValueError(f"Unexpected cell contents: {str(value)}")
 
-    def _parse_key(self, cell_key: str) -> tuple[int, str]:
+    def _parse_key(self, cell_key: CellKey) -> tuple[int, str]:
         if len(cell_key) < 2:
             raise KeyError("Malformed cell key.")
 
@@ -88,19 +69,20 @@ Operation = Literal["+", "-", "*", "/"]
 # One possibility might involve removing the tuples and sub-classing the formula
 Expression = Union[Operand, tuple[Literal["="], "Expression"], tuple[Operation, "Expression", "Expression"]]
 class Formula:
-    def __init__(self, get_cell: CellGetter, expression: Expression):
+    def __init__(self, get_cell: CellGetter, expression: Expression, negated = False):
         self._get_cell = get_cell
         self._expression = expression
-        self._negated = False
+        self._negated = negated
 
     def compute(self) -> CellValue:
         val = self._compute_expression(self._expression)
-        return reconcile_negation(val, self._negated)
+        if self._negated:
+            if isinstance(val, str):
+                raise ValueError("Cannot negate a string.")
+            val = -val
+        return val
     
-    def negate(self):
-        self._negated = True
-
-    def _compute_expression(self, expression: Expression):
+    def _compute_expression(self, expression: Expression) -> CellValue:
         if isinstance(expression, CellKey):
             return self._get_cell(expression)
 
@@ -132,7 +114,7 @@ class Formula:
 Symbol = Union[Operand, Operation]
 Grammar = Union[Expression, Symbol]
 class FormulaParser:
-    def parse_formula(self, get_cell: CellGetter, formula: str) -> Formula:
+    def parse_formula(self, get_cell: CellGetter, formula: str, negated = False) -> Formula:
         if len(formula) <= 0 or formula[0] != "=":
             raise ValueError("Formula must be non-empty and start with a = sign")
         symbols = deque[Symbol]()
@@ -141,14 +123,21 @@ class FormulaParser:
         while i < len(formula):
             c = formula[i]
             if c == "(":
-                i, sub_expression = self._parse_sub_expression(i, formula, get_cell=get_cell)
-                if negate_value:
-                    sub_expression.negate()
-                    negate_value = False
+                i, sub_expression = self._parse_sub_expression(
+                    i,
+                    formula,
+                    get_cell=get_cell,
+                    negated=negate_value
+                )
                 symbols.append(sub_expression)
+                negate_value = False
             elif ord("A") <= ord(c) <= ord("Z"):
                 i, cell_key = self._parse_cell_key(i, formula)
-                symbols.append(CellKey(cell_key, negated=negate_value))
+                symbols.append(Formula(
+                    get_cell=get_cell,
+                    expression=("=", cell_key),
+                    negated=negate_value
+                ))
                 negate_value = False
             elif c in ("/", "*", "-", "+"):
                 if formula[i - 1] in ("=", "/", "*", "-", "+") and not negate_value:
@@ -162,15 +151,17 @@ class FormulaParser:
         return Formula(
             get_cell=get_cell,
             expression=self._operands_to_expression(symbols),
+            negated=negated,
         )
     
-    def _parse_sub_expression(self, index: int, formula: str, get_cell: CellGetter) -> tuple[int, "Formula"]:
+    def _parse_sub_expression(self, index: int, formula: str, get_cell: CellGetter, negated: bool) -> tuple[int, "Formula"]:
             j = index + 1
             while formula[j] != ")":
                 j += 1
             sub_expression = self.parse_formula(
                 get_cell=get_cell,
-                formula=f"={formula[index+1:j]}"
+                formula=f"={formula[index+1:j]}",
+                negated=negated
             )
             return j, sub_expression
     
@@ -251,6 +242,8 @@ assert s.get_cell("A10") == 1
 assert s.get_cell("A11") == 7
 assert s.get_cell("A12") == 10
 
+s.set_cell("A14", "=-A1")
+assert s.get_cell("A14") == -cast(int, s.get_cell("A1"))
 s.set_cell("A13", "=-A12")
 assert s.get_cell("A12") == -cast(int, s.get_cell("A13"))
 s.set_cell("A13", "=-(A12+A12)")
