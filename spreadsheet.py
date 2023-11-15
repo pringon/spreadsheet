@@ -6,7 +6,7 @@ from typing import cast, Callable, Literal, Union
 Row = int
 Col = str
 CellKey = str
-CellValue = Union[str, int, "Formula"]
+CellValue = Union[str, int, float, "Formula"]
 DIGITS = ("0", "1", "2", "3", "4", "5", "6", "7", "8", "9")
 
 
@@ -21,16 +21,33 @@ class Spreadsheet:
         if row not in self._cells:
             self._cells[row] = {}
 
+
         stripped_val = cell_value.strip()
 
-        if all((c in DIGITS for c in stripped_val)):
-            self._cells[row][col] = int(cell_value)
+        if self._set_int(row, col, stripped_val):
+            return
+        elif self._set_float(row, col, stripped_val):
+            return
+        elif len(cell_value) > 0 and stripped_val[0] == "=":
+            parser = FormulaParser()
+            self._cells[row][col] = parser.parse_formula(self.get_cell, stripped_val)
         else:
-            if len(cell_value) > 0 and stripped_val[0] == "=":
-                parser = FormulaParser()
-                self._cells[row][col] = parser.parse_formula(self.get_cell, stripped_val)
-            else:
-                self._cells[row][col] = cell_value
+            self._cells[row][col] = cell_value
+
+    
+    def _set_int(self, row: Row, col: Col, val: str) -> bool:
+        try:
+            self._cells[row][col] = int(val)
+            return True
+        except ValueError:
+            return False
+
+    def _set_float(self, row: Row, col: Col, val: str) -> bool:
+        try:
+            self._cells[row][col] = float(val)
+            return True
+        except ValueError:
+            return False
 
     def get_cell(self, cell_key: Union[CellKey]) -> CellValue:
         return self._get_cell(cell_key)
@@ -39,7 +56,7 @@ class Spreadsheet:
         row, col = self._parse_key(cell_key)
         value = self._cells[row][col]
 
-        if isinstance(value, int) or isinstance(value, str):
+        if isinstance(value, int) or isinstance(value, float) or isinstance(value, str):
             return value
 
         if isinstance(value, Formula):
@@ -95,9 +112,10 @@ class Formula:
         
         left_hand = self._compute_expression(expression[1])
         right_hand = self._compute_expression(expression[2])
+        # TODO: Allow operations between int and float by casting int
         if not any([
             isinstance(left_hand, c_type) and isinstance(right_hand, c_type)
-            for c_type in [str, int]
+            for c_type in [str, int, float]
         ]):
             raise ValueError(f"Mismatched types in expression: {expression}")
         if expression[0] == "*":
@@ -218,8 +236,7 @@ class FormulaParser:
 
 
 
-# TODO: Handle floats
-# TODO: Handle numeric literals
+# TODO: Handle numeric literals in formula
 # TODO: Handle ranges and functions (start with SUM over a range)
 s = Spreadsheet()
 s.set_cell("A1", "3")
@@ -296,3 +313,9 @@ s.set_cell("A2", " =A1 +A1")
 assert s.get_cell("A2") == 4
 s.set_cell("A2", "=A1 + A1")
 assert s.get_cell("A2") == 4
+
+s.set_cell("A1", "3.4")
+assert s.get_cell("A1") == 3.4
+s.set_cell("A2", "2.3")
+s.set_cell("A3", "=A1+A2")
+assert s.get_cell("A3") == 3.4 + 2.3
