@@ -117,28 +117,25 @@ class Formula:
         
         left_hand = self._compute_expression(expression[1])
         right_hand = self._compute_expression(expression[2])
-        # TODO: This check is convoluted and ints are not typesafe (need to use // operator)
-        # Should refactor to handle the differing str, int, float (+ int) cases.
-        if not any([
-            *(
-            isinstance(left_hand, c_type) and isinstance(right_hand, c_type)
-            for c_type in [str, int, float]
-            ), *(
-                isinstance(left_hand, type1) and isinstance(right_hand, type2)
-                for type1, type2 in [(int, float), (float, int)]
-            )
-        ]):
-            raise ValueError(f"Mismatched types in expression: {expression}")
-        if expression[0] == "*":
-            return left_hand * right_hand
-        elif expression[0] == "/":
-            return self._compute_expression(expression[1]) / self._compute_expression(expression[2])
-        elif expression[0] == "+":
-            return self._compute_expression(expression[1]) + self._compute_expression(expression[2])
-        elif expression[0] == "-":
-            return self._compute_expression(expression[1]) - self._compute_expression(expression[2])
 
-        raise ValueError(f"Unexpected expression operation: {expression[0]}")
+        if isinstance(left_hand, str) and isinstance(right_hand, str):
+            if expression[0] == "+":
+                return left_hand + right_hand
+
+        if any([
+            isinstance(left_hand, type1) and isinstance(right_hand, type2)
+            for type1, type2 in [(int, int), (float, float), (int, float), (float, int)]
+        ]):
+            if expression[0] == "*":
+                return left_hand * right_hand
+            elif expression[0] == "/":
+                return left_hand / right_hand
+            elif expression[0] == "+":
+                return left_hand + right_hand
+            elif expression[0] == "-":
+                return left_hand - right_hand
+
+        raise ValueError(f"Unexpected operation '{expression[0]}' on operands '{left_hand}' and '{right_hand}'")
 
 
 Symbol = Union[Operand, Operation]
