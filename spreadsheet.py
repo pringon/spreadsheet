@@ -7,7 +7,9 @@ Row = int
 Col = str
 CellKey = str
 CellValue = Union[str, int, float, "Formula"]
+Numeric = Union[int, float]
 DIGITS = ("0", "1", "2", "3", "4", "5", "6", "7", "8", "9")
+OPERATIONS = ("+", "-", "*", "/")
 
 
 CellGetter = Callable[[Union[CellKey]], CellValue]
@@ -101,6 +103,9 @@ class Formula:
         return val
     
     def _compute_expression(self, expression: Expression) -> CellValue:
+        if isinstance(expression, int) or isinstance(expression, float):
+            return expression
+
         if isinstance(expression, CellKey):
             return self._get_cell(expression)
 
@@ -112,10 +117,16 @@ class Formula:
         
         left_hand = self._compute_expression(expression[1])
         right_hand = self._compute_expression(expression[2])
-        # TODO: Allow operations between int and float by casting int
+        # TODO: This check is convoluted and ints are not typesafe (need to use // operator)
+        # Should refactor to handle the differing str, int, float (+ int) cases.
         if not any([
+            *(
             isinstance(left_hand, c_type) and isinstance(right_hand, c_type)
             for c_type in [str, int, float]
+            ), *(
+                isinstance(left_hand, type1) and isinstance(right_hand, type2)
+                for type1, type2 in [(int, float), (float, int)]
+            )
         ]):
             raise ValueError(f"Mismatched types in expression: {expression}")
         if expression[0] == "*":
@@ -150,23 +161,36 @@ class FormulaParser:
                 )
                 symbols.append(sub_expression)
                 negate_value = False
-            elif ord("A") <= ord(c) <= ord("Z"):
-                i, cell_key = self._parse_cell_key(i, formula)
-                symbols.append(Formula(
-                    get_cell=get_cell,
-                    expression=("=", cell_key),
-                    negated=negate_value
-                ))
-                negate_value = False
-            elif c in ("/", "*", "-", "+"):
-                if formula[i - 1] in ("=", "/", "*", "-", "+") and not negate_value:
+            elif c in OPERATIONS:
+                if formula[i - 1] in ("=", *OPERATIONS) and not negate_value:
                     negate_value = True
                 else:
                     symbols.append(cast(Operation, c))
             elif c == " ":
                 pass
             else:
-                raise ValueError(f"Unexpected character in formula: {c}")
+                parsed = False
+                if not parsed:
+                    try:
+                        i, cell_key = self._parse_cell_key(i, formula)
+                        symbols.append(Formula(
+                            get_cell=get_cell,
+                            expression=("=", cell_key),
+                            negated=negate_value
+                        ))
+                        parsed = True
+                    except ValueError:
+                        pass
+                if not parsed:
+                    try:
+                        i, numeric_literal = self._parse_numeric(i, formula)
+                        symbols.append(-numeric_literal if negate_value else numeric_literal)
+                        parsed = True
+                    except ValueError:
+                        pass
+                negate_value = False
+                if not parsed:
+                    raise ValueError(f"Unexpected token in formula: {c}")
             i += 1
 
         return Formula(
@@ -176,23 +200,54 @@ class FormulaParser:
         )
     
     def _parse_sub_expression(self, index: int, formula: str, get_cell: CellGetter, negated: bool) -> tuple[int, "Formula"]:
-            j = index + 1
-            while formula[j] != ")":
-                j += 1
-            sub_expression = self.parse_formula(
-                get_cell=get_cell,
-                formula=f"={formula[index+1:j]}",
-                negated=negated
-            )
-            return j, sub_expression
-    
+        j = index + 1
+        while formula[j] != ")":
+            j += 1
+        sub_expression = self.parse_formula(
+            get_cell=get_cell,
+            formula=f"={formula[index+1:j]}",
+            negated=negated
+        )
+        return j, sub_expression
+
+    # XXX: Think about simplifying this 
     def _parse_cell_key(self, index: int, formula: str) -> tuple[int, str]:
-            cell_key = [formula[index]]
+        cell_key = []
+        while index < len(formula) and ord("A") <= ord(formula[index]) <= ord("Z"):
+            cell_key.append(formula[index])
+            index +=1
+        if len(cell_key) <= 0:
+            raise ValueError(f"Malformed cell key. Expected at least one character between A and Z. Got: {formula[index]}")
+        len_col = len(cell_key)
+        while index < len(formula) and formula[index] in DIGITS:
+            cell_key.append(formula[index])
             index += 1
-            while index < len(formula) and ord("0") <= ord(formula[index]) <= ord("9"):
-                cell_key.append(formula[index])
-                index += 1
-            return index - 1, "".join(cell_key)
+        if len(cell_key) == len_col:
+            raise ValueError(f"Malformed cell key. Expected at least one digit. Got: {formula[index]}")
+        if index != len(formula) and formula[index] not in (")", *OPERATIONS, " "):
+            raise ValueError(f"Malformed cell key. Unexpecteded token: {formula[index]}")
+        return index - 1, "".join(cell_key)
+
+    def _parse_numeric(self, index: int, formula: str) -> tuple[int, Numeric]:
+        numeric = []
+
+        while index < len(formula) and formula[index] in DIGITS:
+            numeric.append(formula[index])
+            index += 1
+        if index == len(formula) or formula[index] in (")", *OPERATIONS, " "):
+            return index - 1, int("".join(numeric))
+
+        if formula[index] != ".":
+            raise ValueError(f"Malformed numeric. Unexpecteded token: {formula[index]}")
+        numeric.append(".")
+        index += 1
+
+        while index < len(formula) and formula[index] in DIGITS:
+            numeric.append(formula[index])
+            index += 1
+        if index != len(formula) and formula[index] not in (")", *OPERATIONS, " "):
+            raise ValueError(f"Malformed numeric. Unexpecteded token: {formula[index]}")
+        return index - 1, float("".join(numeric))
     
     def _operands_to_expression(self, symbols: deque[Symbol]) -> Expression:
         try:
@@ -236,7 +291,6 @@ class FormulaParser:
 
 
 
-# TODO: Handle numeric literals in formula
 # TODO: Handle ranges and functions (start with SUM over a range)
 s = Spreadsheet()
 s.set_cell("A1", "3")
@@ -318,4 +372,9 @@ s.set_cell("A1", "3.4")
 assert s.get_cell("A1") == 3.4
 s.set_cell("A2", "2.3")
 s.set_cell("A3", "=A1+A2")
+assert s.get_cell("A3") == 3.4 + 2.3
+
+s.set_cell("A3", "=A1+2")
+assert s.get_cell("A3") == 3.4 + 2
+s.set_cell("A3", "=A1+2.3")
 assert s.get_cell("A3") == 3.4 + 2.3
